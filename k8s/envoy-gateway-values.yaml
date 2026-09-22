@@ -1,4 +1,6 @@
-# Envoy Gateway controller chart values for the private lab installation.
+# Envoy Gateway controller chart values.
+# A single replica is a single point of failure for all ingress; raise it
+# and add a PodDisruptionBudget where availability matters.
 deployment:
   replicas: 1
 service:

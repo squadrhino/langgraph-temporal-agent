@@ -186,7 +186,7 @@ async def stream_agent_chat(
     # single customer whose orders the conversation is about. Until the UI lets
     # them pick one, they are refused here rather than silently scoped to
     # nothing. request.user_id is only honoured for anonymous callers, which
-    # exists so the lab still works with OIDC_REQUIRED=false.
+    # exists so local development still works with OIDC_REQUIRED=false.
     if user is not None:
         if user.customer_id is None:
             raise HTTPException(

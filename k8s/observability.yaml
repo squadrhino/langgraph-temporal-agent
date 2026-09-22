@@ -9,8 +9,9 @@
 # --gpu-memory-utilization values in vllm.yaml are sized correctly. That was
 # previously only visible by reading startup logs.
 #
-# Storage is emptyDir: metrics are disposable and a lab does not need retention
-# across a pod restart.
+# Storage is emptyDir, so metrics do not survive a pod restart. Swap in a
+# PersistentVolumeClaim, or ship to a remote-write endpoint, wherever the
+# history matters.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -252,8 +253,9 @@ spec:
         - name: grafana
           image: grafana/grafana:11.5.1
           env:
-            # Lab only. Anonymous viewing keeps the dashboard one click away
-            # behind the gateway; there is no login to manage.
+            # Anonymous admin access, relying entirely on the gateway to
+            # restrict who reaches it. Put Grafana behind real
+            # authentication before exposing it to an untrusted network.
             - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
             - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: "Admin"}
             - {name: GF_AUTH_BASIC_ENABLED, value: "false"}

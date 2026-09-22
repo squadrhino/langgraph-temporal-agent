@@ -1,4 +1,4 @@
-# Lab-only NVIDIA device-plugin configuration for one GPU shared by several pods.
+# NVIDIA device-plugin configuration for one GPU shared by several pods.
 # Time-slicing does not isolate GPU memory or compute capacity -- it only hands
 # out scheduling slots, so the per-pod --gpu-memory-utilization values in
 # vllm.yaml are what actually prevent an OOM.

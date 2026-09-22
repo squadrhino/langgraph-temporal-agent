@@ -230,7 +230,7 @@ def test_litellm_maps_logical_roles_to_private_backends() -> None:
 
 def test_litellm_uses_the_shared_postgres_rather_than_its_own() -> None:
     """LiteLLM once ran a private StatefulSet. Three Postgres instances for one
-    lab is three sets of backups, upgrades and passwords, so they were folded
+    deployment is three sets of backups, upgrades and passwords, so they were folded
     into one server holding a database per service. This asserts the
     consolidation, because the failure mode of regressing it is silent: a
     second database appears and works fine until someone looks for the data.

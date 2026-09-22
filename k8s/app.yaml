@@ -5,18 +5,13 @@
 # platform is declared in one place rather than half-declared with the
 # interesting parts started by hand.
 #
-# Images are built from the repository root and are not published anywhere:
+# Images are built from the repository root:
 #
-#   docker build -f Dockerfile.api -t agentops/api:0.1.0 .
-#   docker build -f Dockerfile.ui  -t agentops/ui:0.1.0  .
+#   docker build -f Dockerfile.api -t $REGISTRY/api:0.1.0 .
+#   docker build -f Dockerfile.ui  -t $REGISTRY/ui:0.1.0  .
 #
-# On minikube, build them into the node's own daemon so no registry is needed:
-#
-#   minikube image build -f Dockerfile.api -t agentops/api:0.1.0 .
-#   minikube image build -f Dockerfile.ui  -t agentops/ui:0.1.0  .
-#
-# imagePullPolicy is IfNotPresent throughout, because a locally built tag has
-# no registry to be pulled from and Always would fail the pod.
+# The image references below are unqualified placeholders. Repoint them at
+# your own registry, or patch them in an overlay, before applying.
 #
 # Three workloads, two images: api and worker are the same image with
 # different commands.

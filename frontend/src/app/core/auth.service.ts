@@ -4,7 +4,7 @@ import { Injectable, computed, signal } from '@angular/core';
  * OpenID Connect Authorization Code flow with PKCE, against Keycloak.
  *
  * Written directly rather than pulled from a library because the flow is small
- * and the dependency surface is not worth it for a lab. The security-relevant
+ * and the dependency surface is not worth it here. The security-relevant
  * parts are: a per-attempt code_verifier that never leaves this origin, a state
  * parameter checked on return, and tokens held in sessionStorage so they die
  * with the tab.

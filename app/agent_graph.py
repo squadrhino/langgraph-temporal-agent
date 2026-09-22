@@ -288,7 +288,7 @@ def get_user_preferences(
 
 @tool
 def get_platform_health() -> dict:
-    """Return a sanitized, read-only summary of this lab API and its database."""
+    """Return a sanitized, read-only summary of this API and its database."""
     started_at = perf_counter()
     logger.info("agent_tool_started", tool_name="get_platform_health")
     order_count, product_count = database_counts()

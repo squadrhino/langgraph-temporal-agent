@@ -1116,7 +1116,7 @@ def test_workflow_approval_endpoint(monkeypatch) -> None:
     assert captured == {
         "workflow_id": "refund-order-19",
         "approved": True,
-        "approved_by": "lab-staff",
+        "approved_by": "ops-staff",
     }
 
 

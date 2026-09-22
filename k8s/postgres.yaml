@@ -6,9 +6,10 @@
 # the *databases* separate is the point: a single shared database would collapse
 # the isolation boundary that actually matters.
 #
-# Deliberate local-lab tradeoff: one restart here takes down auth, inference,
-# and workflows together. A production deployment would use separate managed
-# instances per service and accept the extra cost.
+# Known tradeoff: one restart here takes down auth, inference and workflows
+# together, and this StatefulSet has no replica, no backup schedule and no
+# point-in-time recovery. Where that blast radius is unacceptable, run a
+# managed instance per service and accept the extra cost.
 #
 # NOTE: the role/database bootstrap in the ConfigMap below runs ONLY on first
 # boot against an empty data directory. Adding a fourth service later means

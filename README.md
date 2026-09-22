@@ -4,14 +4,17 @@ A customer-support agent that can cancel orders and issue refunds, built to work
 out where the boundaries go once a model can change something.
 
 LangGraph owns the conversation. Temporal owns anything with a consequence.
-LiteLLM sits in front of every model call. All of it runs on a single-node
-Kubernetes cluster behind one Envoy Gateway.
+LiteLLM sits in front of every model call. All of it is declared as Kubernetes
+manifests behind one Envoy Gateway.
 
-**This is a learning lab, not a production system.** The domain is deliberately
-ordinary — a refund is a readable stand-in for any action where a model's
-decision becomes a durable change to a system it does not own. [What this does
-not prove](#what-this-does-not-prove) is near the bottom and worth reading
-before drawing conclusions from anything above it.
+The domain is deliberately ordinary — a refund is a readable stand-in for any
+action where a model's decision becomes a durable change to a system it does
+not own. **The interesting part is the boundaries, not the domain.**
+
+The manifests describe a complete deployment, but they are a starting point
+rather than a hardened one: there is no TLS, no horizontal scaling and no
+backup policy, and [what this does not prove](#what-this-does-not-prove) lists
+the rest. Read it before drawing conclusions from anything above it.
 
 ---
 
@@ -89,28 +92,38 @@ cd frontend && npm install && npm start
 
 ### In the cluster
 
-Build the two images and apply the manifests. Neither image is published
-anywhere, so on minikube build them into the node's own daemon:
+Build and push the two images, then apply the manifests. Any conformant
+Kubernetes cluster with the Gateway API CRDs and an Envoy Gateway controller
+installed will do.
 
 ```bash
-minikube image build -f Dockerfile.api -t agentops/api:0.1.0 .
-minikube image build -f Dockerfile.ui  -t agentops/ui:0.1.0  .
+export REGISTRY=your-registry.example.com/agentops
+
+docker build -f Dockerfile.api -t $REGISTRY/api:0.1.0 .
+docker build -f Dockerfile.ui  -t $REGISTRY/ui:0.1.0  .
+docker push $REGISTRY/api:0.1.0
+docker push $REGISTRY/ui:0.1.0
+
+kubectl create secret generic agentops-app-secret -n agentops \
+  --from-literal=llm-api-key=<the application's LiteLLM key>
 
 kubectl apply -f k8s/
-kubectl create secret generic agentops-app-secret -n agentops \
-  --from-literal=llm-api-key=<your LiteLLM key>
 ```
 
-`k8s/app.yaml` runs three workloads from those two images — the API, the
-Temporal worker (same image, different command) and the UI. The gateway serves
-the whole application on one hostname and splits API from UI by path, so the
-browser sees a single origin and needs no CORS configuration.
+`k8s/app.yaml` pins `agentops/api:0.1.0` and `agentops/ui:0.1.0`; repoint the
+`image:` fields at your registry, or overlay them, before applying.
 
-Add to your hosts file:
+Three workloads come from those two images — the API, the Temporal worker
+(same image, different command) and the UI. The gateway serves the whole
+application on one hostname and splits API from UI by path, so the browser
+sees a single origin and needs no CORS configuration.
 
-```
-<minikube tunnel IP>  agentops.local litellm.agentops.local temporal.agentops.local grafana.agentops.local keycloak.agentops.local
-```
+The gateway publishes a `LoadBalancer` service. Point DNS for
+`agentops.local`, `litellm.agentops.local`, `temporal.agentops.local`,
+`grafana.agentops.local` and `keycloak.agentops.local` at its external
+address, and replace the hostnames in `k8s/envoy-gateway.yaml` with names you
+control. Listeners are HTTP only — terminate TLS at the gateway before
+exposing any of this beyond a trusted network.
 
 ### Tests
 
@@ -193,8 +206,14 @@ retry leaves a single row.
   up with no ceiling until one is created.
 - **Approval is staff-gated, not manager-gated.** `require_approver` exists in
   `app/auth.py` and is not yet wired to the route.
-- **Passwords in `k8s/` are disposable local-lab values.** They are not secrets
-  and are not reused anywhere.
+- **Passwords in `k8s/` are placeholders, checked in as plain Secrets.** They
+  are throwaway values, reused nowhere, and must be replaced before any
+  deployment that matters — ideally by an external secret store rather than
+  by editing these files.
+- **No TLS anywhere.** Gateway listeners are plaintext HTTP and TCP, and the
+  TCP listeners exist for operator access. Terminate TLS at the gateway and
+  restrict or remove those listeners before exposing this beyond a trusted
+  network.
 
 ---
 

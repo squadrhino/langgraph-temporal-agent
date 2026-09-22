@@ -1,9 +1,13 @@
-# Local Envoy Gateway data plane for application-to-LiteLLM traffic.
+# Envoy Gateway data plane: one entry point for the whole namespace.
 #
 # Prerequisite: Envoy Gateway and its Gateway API/extension CRDs.
-# The LoadBalancer is intended for a local Minikube tunnel and the listener is
-# hostname-bound. This manifest does not configure TLS or authentication;
-# LiteLLM still requires its master key for the UI and protected APIs.
+#
+# The gateway publishes a LoadBalancer service; point DNS for the hostnames
+# below at its external address. Listeners are HTTP and plaintext TCP -- this
+# manifest configures no TLS and no gateway-level authentication, so terminate
+# TLS here and replace the hostnames with names you control before exposing it
+# beyond a trusted network. LiteLLM still requires its master key for the UI
+# and protected APIs regardless.
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
 metadata:
@@ -83,13 +87,15 @@ spec:
       allowedRoutes:
         namespaces:
           from: Same
-    # Listeners below were consolidated here from a separate postgres-gateway,
-    # so the namespace has one entry point on one minikube tunnel address.
+    # Listeners below were consolidated here from a separate gateway, so the
+    # namespace has a single entry point on one external address.
     #
     # TCP listeners take no hostname -- the Postgres and Redis wire protocols
-    # carry nothing to match on, so the port alone selects the backend. Traffic
-    # is unencrypted, acceptable only because this stays on a local tunnel.
-    # In-cluster clients bypass the gateway and use the Services directly.
+    # carry nothing to match on, so the port alone selects the backend. They
+    # exist for operator access from outside the cluster and carry no TLS, so
+    # restrict them at the load balancer or drop them entirely in an
+    # environment that does not need them. In-cluster clients bypass the
+    # gateway and address the Services directly.
     - name: postgres
       protocol: TCP
       port: 5432
