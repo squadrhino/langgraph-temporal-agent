@@ -1,0 +1,124 @@
+<section class="card orders" aria-labelledby="orders-title">
+  <div class="card__head">
+    <h2 id="orders-title">Orders</h2>
+    <div class="card__actions">
+      <button class="btn btn--ghost btn--sm" type="button" (click)="store.refresh()" [disabled]="store.loading()">
+        <app-icon name="refresh" /> Refresh
+      </button>
+      <button class="btn btn--primary btn--sm" type="button" (click)="newOrder.emit()">
+        <app-icon name="plus" /> New order
+      </button>
+    </div>
+  </div>
+
+  <div class="filters">
+    <div class="field field--grow">
+      <label for="orders-search">Search</label>
+      <div class="input-wrap">
+        <app-icon name="search" class="input-wrap__icon" />
+        <input
+          id="orders-search"
+          type="search"
+          autocomplete="off"
+          placeholder="Order, customer, SKU or product"
+          [value]="store.query()"
+          (input)="onSearch($event)"
+        />
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="orders-status">Status</label>
+      <select id="orders-status" (change)="onStatus($event)">
+        <option value="" [selected]="store.status() === ''">All statuses</option>
+        @for (status of statuses; track status) {
+          <option [value]="status" [selected]="store.status() === status">{{ status | titlecase }}</option>
+        }
+      </select>
+    </div>
+
+    <div class="field field--sm">
+      <label for="orders-limit">Limit</label>
+      <select id="orders-limit" (change)="onLimit($event)">
+        @for (limit of limits; track limit) {
+          <option [value]="limit" [selected]="store.limit() === limit">{{ limit }}</option>
+        }
+      </select>
+    </div>
+  </div>
+
+  <p class="meta" aria-live="polite">
+    <span>{{ meta() }}</span>
+    @if (store.hasFilters()) {
+      <button class="link" type="button" (click)="store.clearFilters()">Clear filters</button>
+    }
+  </p>
+
+  @if (store.error(); as error) {
+    <div class="state state--error" role="alert">
+      <app-icon name="alert" />
+      <div>
+        <p class="state__title">Could not load orders</p>
+        <p class="state__body">{{ error }}</p>
+      </div>
+      <button class="btn btn--sm" type="button" (click)="store.refresh()">Retry</button>
+    </div>
+  } @else {
+    <div class="table-wrap" tabindex="0" role="region" aria-labelledby="orders-title">
+      <table class="table">
+        <thead>
+          <tr>
+            @for (column of columns; track column.key) {
+              <th scope="col" [class.ta-r]="column.numeric" [attr.aria-sort]="ariaSort(column.key)">
+                <button type="button" class="th" [class.th--r]="column.numeric" (click)="store.toggleSort(column.key)">
+                  {{ column.label }}
+                  <span class="th__dir" aria-hidden="true">{{ direction(column.key) }}</span>
+                </button>
+              </th>
+            }
+          </tr>
+        </thead>
+
+        <tbody>
+          @if (store.loading()) {
+            @for (row of skeletonRows; track $index) {
+              <tr class="row row--skeleton">
+                @for (cell of [1, 2, 3, 4, 5, 6, 7]; track cell) {
+                  <td><span class="skeleton cell-skeleton"></span></td>
+                }
+              </tr>
+            }
+          } @else {
+            @for (order of store.visibleOrders(); track order.id) {
+              <tr class="row" [class.row--new]="store.highlighted() === order.id">
+                <td class="num id">{{ order.id }}</td>
+                <td class="num">{{ order.customer_id }}</td>
+                <td>
+                  <span class="product">{{ order.product.name }}</span>
+                  <span class="sku num">{{ order.product.sku }}</span>
+                </td>
+                <td class="ta-r num">{{ order.quantity | number }}</td>
+                <td class="ta-r num strong">{{ order.total | currency: 'USD' }}</td>
+                <td>
+                  <span class="badge" [class]="'badge badge--' + order.status">{{ order.status }}</span>
+                </td>
+                <td class="num muted">{{ order.created_at | date: 'dd MMM yyyy' }}</td>
+              </tr>
+            }
+          }
+        </tbody>
+      </table>
+
+      @if (!store.loading() && !store.visibleOrders().length) {
+        <div class="state state--empty">
+          <app-icon name="inbox" class="state__glyph" />
+          <p class="state__title">No orders match these filters</p>
+          <p class="state__body">Try a different status, or clear the search box.</p>
+          @if (store.hasFilters()) {
+            <button class="btn btn--sm" type="button" (click)="store.clearFilters()">Clear filters</button>
+          }
+        </div>
+      }
+    </div>
+  }
+</section>

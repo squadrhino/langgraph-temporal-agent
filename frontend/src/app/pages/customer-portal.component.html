@@ -1,0 +1,106 @@
+<a class="skip-link" href="#main">Skip to main content</a>
+
+<header class="bar">
+  <div class="brand">
+    <span class="brand__mark" aria-hidden="true"><app-icon name="cart" /></span>
+    <div class="brand__text">
+      <h1>Computer Store</h1>
+      <p>Customer support</p>
+    </div>
+  </div>
+
+  <div class="bar__actions">
+    @if (session.customerId(); as customerId) {
+      <span class="who" role="status">
+        <app-icon name="user" />
+        <span class="num">{{ customerId }}</span>
+      </span>
+      <button class="btn btn--ghost btn--sm" type="button" (click)="signOut()">Sign out</button>
+    }
+    <button
+      class="btn btn--ghost btn--icon"
+      type="button"
+      (click)="theme.toggle()"
+      [attr.aria-label]="theme.theme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'"
+    >
+      <app-icon [name]="theme.theme() === 'dark' ? 'sun' : 'moon'" />
+    </button>
+  </div>
+</header>
+
+<main id="main" class="page">
+  @if (!session.customerId()) {
+    <section class="card signin" aria-labelledby="signin-title">
+      <div class="signin__body">
+        <span class="signin__mark" aria-hidden="true"><app-icon name="user" /></span>
+        <h2 id="signin-title">Sign in to support</h2>
+        <p class="signin__lead">
+          Enter the customer ID from your order confirmation to start a conversation with support.
+        </p>
+
+        <form [formGroup]="form" (ngSubmit)="signIn()" novalidate>
+          <div class="field">
+            <label for="customer-id">Customer ID</label>
+            <input
+              id="customer-id"
+              formControlName="customer_id"
+              autocomplete="off"
+              autocapitalize="characters"
+              spellcheck="false"
+              placeholder="CUS-028"
+              [attr.aria-invalid]="invalid"
+              aria-describedby="customer-id-help customer-id-error"
+            />
+            @if (invalid) {
+              <p class="err" id="customer-id-error" role="alert">
+                <app-icon name="alert" /> Enter an ID in the form CUS-028.
+              </p>
+            } @else {
+              <p class="help" id="customer-id-help">For example CUS-028. Case does not matter.</p>
+            }
+          </div>
+
+          <button class="btn btn--primary btn--block" type="submit">Continue</button>
+        </form>
+
+        <p class="signin__note">
+          <app-icon name="info" />
+          <span>
+            Identity only — there is no password yet, and no account data is checked. Authentication
+            arrives with the trust layer.
+          </span>
+        </p>
+      </div>
+    </section>
+  } @else {
+    <section class="welcome" aria-live="polite">
+      <h2>How can we help?</h2>
+      <p>{{ greeting() }}</p>
+    </section>
+
+    <app-agent-chat
+      class="portal-chat"
+      heading="Chat with support"
+      introTitle="Start the conversation"
+      introBody="Describe the problem and include your order number if you have it."
+      placeholder="Type your message…"
+      [suggestions]="suggestions"
+      [showDiagnostics]="false"
+      [userId]="session.customerId()!"
+    />
+
+    <p class="disclaimer">
+      <app-icon name="info" />
+      <span>
+        Replies are placeholder text until the support agent is connected. Nothing you send here
+        reaches a person yet.
+      </span>
+    </p>
+  }
+
+  <footer class="foot">
+    <span>Computer Store</span>
+    <span class="foot__sep" aria-hidden="true">·</span>
+    <a routerLink="/">Operations console</a>
+  </footer>
+</main>

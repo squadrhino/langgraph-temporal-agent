@@ -1,0 +1,28 @@
+[project]
+name = "agentops"
+version = "0.1.0"
+description = "Support agent platform: a LangGraph agent graph over durable Temporal workflows"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.116,<1.0",
+    "langchain-openai>=1.0,<2.0",
+    "langgraph>=1.0,<2.0",
+    "langgraph-checkpoint-redis>=0.4,<1.0",
+    "nemoguardrails>=0.24,<0.25",
+    "psycopg[binary]>=3.2,<4.0",
+    "pyjwt[crypto]>=2.10,<3.0",
+    "python-dotenv>=1.1,<2.0",
+    "structlog>=25.4,<26.0",
+    "temporalio>=1.32,<2.0",
+    "uvicorn[standard]>=0.35,<1.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1.0",
+    "pytest>=8.4,<9.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

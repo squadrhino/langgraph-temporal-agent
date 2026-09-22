@@ -1,0 +1,281 @@
+# Prometheus and Grafana for the inference stack.
+#
+# Scrapes the three vLLM engines and LiteLLM. vLLM's /metrics is unauthenticated
+# so it is scraped directly; LiteLLM's requires the master key, so that job
+# carries an Authorization header.
+#
+# The point of this is the KV-cache and queue metrics: kv_cache_usage_perc and
+# num_requests_waiting are what show whether the per-engine
+# --gpu-memory-utilization values in vllm.yaml are sized correctly. That was
+# previously only visible by reading startup logs.
+#
+# Storage is emptyDir: metrics are disposable and a lab does not need retention
+# across a pod restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: agentops
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: vllm
+        metrics_path: /metrics
+        static_configs:
+          - targets: ["vllm-qwen-agent:8000"]
+            labels: {engine: qwen-agent, model: "Qwen3-14B-NVFP4", quant: nvfp4}
+          - targets: ["vllm-qwen-specialist:8000"]
+            labels: {engine: qwen-specialist, model: "Qwen2.5-1.5B-AWQ", quant: awq}
+          - targets: ["vllm-embedding:8000"]
+            labels: {engine: embedding, model: "Qwen3-Embedding-0.6B", quant: none}
+
+      - job_name: litellm
+        metrics_path: /metrics
+        authorization:
+          type: Bearer
+          credentials_file: /etc/prometheus/secrets/master-key
+        static_configs:
+          - targets: ["litellm:4000"]
+
+      - job_name: prometheus
+        static_configs:
+          - targets: ["localhost:9090"]
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector: {app: prometheus}
+  ports:
+    - {name: http, port: 9090, targetPort: http}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: agentops
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: prometheus}
+  template:
+    metadata:
+      labels: {app: prometheus}
+    spec:
+      securityContext: {fsGroup: 65534}
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.1.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=7d
+            - --web.enable-lifecycle
+          ports:
+            - {name: http, containerPort: 9090}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus/prometheus.yml, subPath: prometheus.yml}
+            - {name: secrets, mountPath: /etc/prometheus/secrets, readOnly: true}
+            - {name: data, mountPath: /prometheus}
+      volumes:
+        - name: config
+          configMap: {name: prometheus-config}
+        - name: secrets
+          secret:
+            secretName: litellm-secrets
+            items:
+              - {key: master-key, path: master-key}
+        - name: data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-datasources
+  namespace: agentops
+data:
+  datasources.yaml: |
+    apiVersion: 1
+    datasources:
+      - name: Prometheus
+        type: prometheus
+        access: proxy
+        url: http://prometheus:9090
+        isDefault: true
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: agentops
+data:
+  provider.yaml: |
+    apiVersion: 1
+    providers:
+      - name: agentops
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: agentops
+data:
+  vllm.json: |
+    {
+      "title": "vLLM inference",
+      "uid": "vllm-inference",
+      "timezone": "browser",
+      "refresh": "10s",
+      "time": {"from": "now-30m", "to": "now"},
+      "panels": [
+        {
+          "title": "KV cache usage",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1, "min": 0}},
+          "targets": [{
+            "expr": "vllm:kv_cache_usage_perc",
+            "legendFormat": "{{engine}}"
+          }]
+        },
+        {
+          "title": "Requests waiting (queue depth)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+          "targets": [{
+            "expr": "vllm:num_requests_waiting",
+            "legendFormat": "{{engine}}"
+          }]
+        },
+        {
+          "title": "Inter-token latency (p95)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+          "fieldConfig": {"defaults": {"unit": "s"}},
+          "targets": [{
+            "expr": "histogram_quantile(0.95, sum(rate(vllm:inter_token_latency_seconds_bucket[5m])) by (le, engine))",
+            "legendFormat": "{{engine}}"
+          }]
+        },
+        {
+          "title": "Output tokens/sec",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+          "targets": [{
+            "expr": "sum(rate(vllm:generation_tokens_total[1m])) by (engine)",
+            "legendFormat": "{{engine}}"
+          }]
+        },
+        {
+          "title": "Prefix cache hit rate",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+          "fieldConfig": {"defaults": {"unit": "percentunit", "max": 1, "min": 0}},
+          "targets": [{
+            "expr": "sum(rate(vllm:prefix_cache_hits_total[5m])) by (engine) / clamp_min(sum(rate(vllm:prefix_cache_queries_total[5m])) by (engine), 1)",
+            "legendFormat": "{{engine}}"
+          }]
+        },
+        {
+          "title": "Requests running",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
+          "targets": [{
+            "expr": "vllm:num_requests_running",
+            "legendFormat": "{{engine}}"
+          }]
+        },
+        {
+          "title": "End-to-end latency (p95)",
+          "type": "timeseries",
+          "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+          "fieldConfig": {"defaults": {"unit": "s"}},
+          "targets": [{
+            "expr": "histogram_quantile(0.95, sum(rate(vllm:e2e_request_latency_seconds_bucket[5m])) by (le, engine))",
+            "legendFormat": "{{engine}}"
+          }]
+        }
+      ]
+    }
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector: {app: grafana}
+  ports:
+    - {name: http, port: 3000, targetPort: http}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: agentops
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: grafana}
+  template:
+    metadata:
+      labels: {app: grafana}
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.5.1
+          env:
+            # Lab only. Anonymous viewing keeps the dashboard one click away
+            # behind the gateway; there is no login to manage.
+            - {name: GF_AUTH_ANONYMOUS_ENABLED, value: "true"}
+            - {name: GF_AUTH_ANONYMOUS_ORG_ROLE, value: "Admin"}
+            - {name: GF_AUTH_BASIC_ENABLED, value: "false"}
+            - {name: GF_SECURITY_ALLOW_EMBEDDING, value: "true"}
+            - {name: GF_USERS_DEFAULT_THEME, value: "dark"}
+          ports:
+            - {name: http, containerPort: 3000}
+          readinessProbe:
+            httpGet: {path: /api/health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: datasources, mountPath: /etc/grafana/provisioning/datasources}
+            - {name: dashboard-provider, mountPath: /etc/grafana/provisioning/dashboards}
+            - {name: dashboards, mountPath: /var/lib/grafana/dashboards}
+      volumes:
+        - name: datasources
+          configMap: {name: grafana-datasources}
+        - name: dashboard-provider
+          configMap: {name: grafana-dashboard-provider}
+        - name: dashboards
+          configMap: {name: grafana-dashboards}

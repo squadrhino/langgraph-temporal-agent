@@ -1,0 +1,25 @@
+.env
+__pycache__/
+.pytest_cache/
+.venv/
+.venv313/
+node_modules/
+.angular/
+app/static/
+
+# Local credential notes
+CREDENTIALS.md
+CREDENTIALS.html
+
+# Superseded article drafts, backups and exported figures
+old_articles/
+
+# Angular build output
+frontend/dist/
+
+# Diagram working files and article source documents
+diagram-archive/
+*.docx
+
+# Internal design notes
+docs/

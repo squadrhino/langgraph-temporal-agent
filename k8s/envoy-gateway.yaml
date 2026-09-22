@@ -1,0 +1,307 @@
+# Local Envoy Gateway data plane for application-to-LiteLLM traffic.
+#
+# Prerequisite: Envoy Gateway and its Gateway API/extension CRDs.
+# The LoadBalancer is intended for a local Minikube tunnel and the listener is
+# hostname-bound. This manifest does not configure TLS or authentication;
+# LiteLLM still requires its master key for the UI and protected APIs.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: agentops-inference-proxy
+  namespace: agentops
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        name: agentops-inference-gateway
+        type: LoadBalancer
+      envoyDeployment:
+        name: agentops-inference-gateway
+        replicas: 1
+        container:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+              
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: agentops-envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+
+
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: inference-gateway
+  namespace: agentops
+spec:
+  gatewayClassName: agentops-envoy
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: agentops-inference-proxy
+  listeners:
+    - name: litellm-http
+      hostname: litellm.agentops.local
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: temporal-ui-http
+      hostname: temporal.agentops.local
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: grafana-http
+      hostname: grafana.agentops.local
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # The application itself. One hostname carries both the Angular UI and the
+    # API; k8s/app.yaml splits them by path so the browser sees one origin and
+    # needs no CORS configuration.
+    - name: app-http
+      hostname: agentops.local
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+    # Listeners below were consolidated here from a separate postgres-gateway,
+    # so the namespace has one entry point on one minikube tunnel address.
+    #
+    # TCP listeners take no hostname -- the Postgres and Redis wire protocols
+    # carry nothing to match on, so the port alone selects the backend. Traffic
+    # is unencrypted, acceptable only because this stays on a local tunnel.
+    # In-cluster clients bypass the gateway and use the Services directly.
+    - name: postgres
+      protocol: TCP
+      port: 5432
+      allowedRoutes:
+        kinds:
+          - kind: TCPRoute
+        namespaces:
+          from: Same
+    # Published on 6379, matching the Service port as Postgres does. Note this
+    # binds 6379 on the tunnel address, so a Redis running natively on the host
+    # will collide with it.
+    - name: redis
+      protocol: TCP
+      port: 6379
+      allowedRoutes:
+        kinds:
+          - kind: TCPRoute
+        namespaces:
+          from: Same
+    # Temporal's gRPC frontend, passed through at L4 rather than routed as
+    # gRPC. Temporal SDK clients long-poll: a task queue poll holds the stream
+    # open for a minute or more. An L7 GRPCRoute would need h2c enabled via a
+    # ClientTrafficPolicy and its route timeout disabled, the same way the
+    # LiteLLM streaming route does. TCP passthrough avoids both. Switch to a
+    # GRPCRoute if per-method routing or gRPC status handling is ever needed.
+    - name: temporal-grpc
+      protocol: TCP
+      port: 7233
+      allowedRoutes:
+        kinds:
+          - kind: TCPRoute
+        namespaces:
+          from: Same
+    # Keycloak runs in its own namespace next to its operator, so unlike every
+    # other listener here this one must accept routes from outside agentops.
+    # Scoped by selector to the keycloak namespace rather than opened to All.
+    - name: keycloak-http
+      hostname: keycloak.agentops.local
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchLabels:
+              kubernetes.io/metadata.name: keycloak
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: litellm-inference
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: litellm-http
+  hostnames:
+    - litellm.agentops.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /v1
+      # Explicitly disable the route-wide timeout so streamed model responses
+      # are not terminated by Envoy's default request timeout. LiteLLM retains
+      # its own configured upstream timeout.
+      timeouts:
+        request: 0s
+      backendRefs:
+        - name: litellm
+          port: 4000
+    - matches:
+        - path:
+            type: Exact
+            value: /health
+      timeouts:
+        request: 10s
+      backendRefs:
+        - name: litellm
+          port: 4000
+---
+# The UI uses root-relative login, API, and static-asset paths, so a dedicated
+# hostname needs a root fallback in addition to the narrower inference route.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: litellm-ui
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: litellm-http
+  hostnames:
+    - litellm.agentops.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 0s
+      backendRefs:
+        - name: litellm
+          port: 4000
+---
+# Prevent ordinary pods from bypassing the inference gateway and connecting
+# directly to LiteLLM. Envoy Gateway's managed data plane runs in the
+# envoy-gateway-system namespace with the default deployment mode.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: litellm-ingress-via-envoy-only
+  namespace: agentops
+spec:
+  podSelector:
+    matchLabels:
+      app: litellm
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway-system
+      ports:
+        - protocol: TCP
+          port: 4000
+
+---
+# Routes for the consolidated listeners above. Backends are the Services that
+# are already running in this namespace.
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: postgres
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: postgres
+  rules:
+    - backendRefs:
+        - name: postgres-db
+          port: 5432
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: redis
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: redis
+  rules:
+    - backendRefs:
+        - name: redis
+          port: 6379
+---
+# Temporal's web UI. The UI itself talks gRPC to the temporal frontend inside
+# the cluster, so only this HTTP surface needs exposing. Root path, no prefix
+# stripping -- the UI uses root-relative asset and API paths.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: temporal-ui
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: temporal-ui-http
+  hostnames:
+    - temporal.agentops.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: temporal-ui
+          port: 8080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: TCPRoute
+metadata:
+  name: temporal
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: temporal-grpc
+  rules:
+    - backendRefs:
+        - name: temporal
+          port: 7233
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: grafana
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: grafana-http
+  hostnames:
+    - grafana.agentops.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: grafana
+          port: 3000

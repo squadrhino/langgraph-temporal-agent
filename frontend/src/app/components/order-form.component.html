@@ -1,0 +1,87 @@
+<section class="card" aria-labelledby="new-order-title">
+  <div class="card__head">
+    <h2 id="new-order-title">New order</h2>
+  </div>
+
+  <form class="form" [formGroup]="form" (ngSubmit)="submit()" novalidate>
+    <div class="row">
+      <div class="field">
+        <label for="customer_id">Customer ID <span class="req" aria-hidden="true">*</span></label>
+        <input
+          id="customer_id"
+          formControlName="customer_id"
+          autocomplete="off"
+          placeholder="CUS-001"
+          [attr.aria-invalid]="invalid('customer_id')"
+          aria-describedby="customer-help customer-error"
+        />
+        @if (invalid('customer_id')) {
+          <p class="err" id="customer-error" role="alert">
+            <app-icon name="alert" /> Enter a customer ID.
+          </p>
+        } @else {
+          <p class="help" id="customer-help">Any non-empty ID.</p>
+        }
+      </div>
+
+      <div class="field field--qty">
+        <label for="quantity">Quantity</label>
+        <input
+          id="quantity"
+          type="number"
+          inputmode="numeric"
+          min="1"
+          max="10"
+          formControlName="quantity"
+          [attr.aria-invalid]="invalid('quantity')"
+          aria-describedby="quantity-help quantity-error"
+        />
+        @if (invalid('quantity')) {
+          <p class="err" id="quantity-error" role="alert">
+            <app-icon name="alert" /> 1 to 10.
+          </p>
+        } @else {
+          <p class="help" id="quantity-help">1 to 10.</p>
+        }
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="product_sku">Product <span class="req" aria-hidden="true">*</span></label>
+      <select
+        id="product_sku"
+        formControlName="product_sku"
+        [attr.aria-invalid]="invalid('product_sku')"
+        aria-describedby="product-error"
+      >
+        <option value="" disabled>Select a product…</option>
+        @for (product of store.products(); track product.sku) {
+          <option [value]="product.sku">
+            {{ product.name }} — {{ product.price | currency: 'USD' }}
+          </option>
+        }
+      </select>
+      @if (invalid('product_sku')) {
+        <p class="err" id="product-error" role="alert">
+          <app-icon name="alert" /> Choose a product from the catalogue.
+        </p>
+      } @else if (selected(); as product) {
+        <p class="help">{{ product.sku }} · {{ categoryLabel(product.category) }}</p>
+      }
+    </div>
+
+    <div class="actions">
+      <div class="total">
+        <span>Order total</span>
+        <strong class="num">{{ total() | currency: 'USD' }}</strong>
+      </div>
+      <button class="btn btn--primary" type="submit" [disabled]="submitting()">
+        @if (submitting()) {
+          <span class="spinner" aria-hidden="true"></span> Creating…
+        } @else {
+          <app-icon name="plus" /> Create order
+        }
+      </button>
+    </div>
+  </form>
+</section>

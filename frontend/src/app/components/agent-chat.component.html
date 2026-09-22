@@ -1,0 +1,77 @@
+<section class="card agent" aria-labelledby="agent-title">
+  <div class="card__head">
+    <h2 id="agent-title"><app-icon name="bot" /> {{ heading() }}</h2>
+    @if (showDiagnostics()) {
+      <span class="tag" title="Streamed from POST /agent/chat/stream">Streaming</span>
+    }
+  </div>
+
+  <div class="log" #log role="log" aria-live="polite" aria-label="Agent conversation">
+    @if (!messages().length) {
+      <div class="intro">
+        <app-icon name="bot" class="intro__glyph" />
+        <p class="intro__title">{{ introTitle() }}</p>
+        @if (introBody()) {
+          <p class="intro__body">{{ introBody() }}</p>
+        } @else {
+          <p class="intro__body">
+            Ask about an order and the agent checks its status before answering, for example
+            <span class="mono">What is the status of ORD-004?</span>
+          </p>
+        }
+      </div>
+    }
+
+    @for (message of messages(); track message.id) {
+      <article class="msg" [class]="'msg msg--' + message.role">
+        <span class="msg__avatar" aria-hidden="true">
+          <app-icon [name]="message.role === 'user' ? 'user' : message.role === 'error' ? 'alert' : 'bot'" />
+        </span>
+        <div class="msg__bubble">
+          @if (message.streaming && !message.text) {
+            <div class="typing" aria-label="Agent is replying">
+              <span></span><span></span><span></span>
+            </div>
+          } @else {
+            <p class="msg__text">{{ message.text }}<span class="caret" [class.caret--on]="message.streaming"></span></p>
+          }
+          @if (message.requestId && showDiagnostics()) {
+            <p class="msg__meta mono" title="X-Request-ID header from the API">
+              request {{ message.requestId }}
+            </p>
+          }
+        </div>
+      </article>
+    }
+
+  </div>
+
+  @if (!messages().length) {
+    <div class="chips">
+      @for (suggestion of suggestions(); track suggestion) {
+        <button class="chip" type="button" (click)="use(suggestion)">{{ suggestion }}</button>
+      }
+    </div>
+  }
+
+  <form class="composer" (submit)="$event.preventDefault(); send()">
+    <label class="sr-only" for="agent-input">Message the support agent</label>
+    <textarea
+      id="agent-input"
+      rows="2"
+      [attr.maxlength]="maxLength"
+      [placeholder]="placeholder()"
+      [value]="draft()"
+      (input)="onInput($event)"
+      (keydown)="onKeydown($event)"
+    ></textarea>
+    <div class="composer__foot">
+      <span class="counter num" [class.counter--warn]="draft().length > maxLength - 100">
+        {{ draft().length }} / {{ maxLength }}
+      </span>
+      <button class="btn btn--primary btn--sm" type="submit" [disabled]="pending() || !draft().trim()">
+        <app-icon name="send" /> Send
+      </button>
+    </div>
+  </form>
+</section>

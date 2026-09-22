@@ -1,0 +1,67 @@
+:host {
+  display: block;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4);
+}
+
+/* Customer and quantity share a row so the card stays short: the sidebar's
+   remaining height belongs to the chat panel below it. */
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 84px;
+  gap: var(--sp-3);
+}
+
+.field--qty input {
+  text-align: right;
+}
+
+.actions {
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-3);
+
+  .btn {
+    flex: none;
+  }
+}
+
+.total {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: 0 var(--sp-3);
+  background: var(--surface-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  font-size: 12px;
+  color: var(--fg-muted);
+
+  strong {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--fg);
+  }
+}
+
+.spinner {
+  width: 15px;
+  height: 15px;
+  border: 2px solid color-mix(in srgb, var(--primary-fg) 35%, transparent);
+  border-top-color: var(--primary-fg);
+  border-radius: 50%;
+  animation: spin 700ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

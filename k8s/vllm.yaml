@@ -1,0 +1,380 @@
+# Three independently managed INT4 vLLM servers sharing one GPU through the
+# NVIDIA device plugin's time-sliced nvidia.com/gpu.shared resource.
+# Time-slicing provides scheduling access, not memory or compute isolation.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-model-config
+  namespace: agentops
+data:
+  # NVFP4 rather than AWQ: the RTX 5090 is Blackwell (SM 120), so 4-bit weights
+  # run on FP4 tensor cores instead of Marlin dequant kernels. First-party
+  # NVIDIA checkpoint -- community NVFP4 builds of comparable models had
+  # single-digit download counts and unverifiable provenance.
+  QWEN_AGENT_MODEL_ID: "nvidia/Qwen3-14B-NVFP4"
+  QWEN_AGENT_SERVED_NAME: "qwen-agent"
+  QWEN_AGENT_QUANTIZATION: "modelopt_fp4"
+  QWEN_AGENT_MAX_MODEL_LEN: "8192"
+  # Sized against --max-num-seqs 4, not against the card. vLLM reserves the KV
+  # cache up front from this fraction, so anything beyond what 4 concurrent
+  # sequences can occupy is memory that is held but unreachable. These values
+  # leave roughly 2x headroom over that ceiling for prefix caching.
+  QWEN_AGENT_GPU_MEMORY_UTILIZATION: "0.45"
+  QWEN_SPECIALIST_MODEL_ID: "Qwen/Qwen2.5-1.5B-Instruct-AWQ"
+  QWEN_SPECIALIST_SERVED_NAME: "qwen-specialist"
+  QWEN_SPECIALIST_QUANTIZATION: "awq"
+  QWEN_SPECIALIST_MAX_MODEL_LEN: "8192"
+  QWEN_SPECIALIST_GPU_MEMORY_UTILIZATION: "0.10"
+  # gemma-2b was removed: asked to answer Yes/No for guardrail self-checks it
+  # replied "Yes" to every input, blocking 100% of traffic. Those checks now run
+  # on the 14B, which is already resident.
+
+  # Embeddings for semantic search over stored chat summaries (pgvector lives in
+  # the postgres instance from postgres-app.yaml). Served unquantized: these are
+  # native embedding models, small enough that quantization would trade recall
+  # for a saving that does not matter at this scale.
+  EMBEDDING_MODEL_ID: "Qwen/Qwen3-Embedding-0.6B"
+  EMBEDDING_SERVED_NAME: "qwen-embedding"
+  # The model supports 32k context; 8192 is far more than a chat summary needs
+  # and keeps the activation footprint small. Chosen over bge-small mainly for
+  # input length: bge caps at 512 tokens and silently truncates beyond it.
+  EMBEDDING_MAX_MODEL_LEN: "8192"
+  # 0.6B fp16 weights are ~1.2 GiB on their own, so the 0.04 that suited
+  # bge-small (33M) is not enough here.
+  EMBEDDING_GPU_MEMORY_UTILIZATION: "0.10"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-qwen-agent-models
+  namespace: agentops
+spec:
+  # Bound to the volume retained from the agent-lab namespace so the
+  # downloaded model weights survive the move instead of re-downloading.
+  volumeName: pvc-2f36fdff-0e8d-4285-bbdf-404ee1705d91
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-qwen-specialist-models
+  namespace: agentops
+spec:
+  # Bound to the volume retained from the agent-lab namespace so the
+  # downloaded model weights survive the move instead of re-downloading.
+  volumeName: pvc-f6b39f5d-6436-4f53-a4a9-1fe1621b4390
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen-agent
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector:
+    app: vllm-qwen-agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen-agent
+  namespace: agentops
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-qwen-agent
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen-agent
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.29.0
+          args:
+            - --model
+            - $(MODEL_ID)
+            - --served-model-name
+            - $(SERVED_MODEL_NAME)
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --api-key
+            - $(VLLM_API_KEY)
+            - --quantization
+            - $(QUANTIZATION)
+            - --max-model-len
+            - $(MAX_MODEL_LEN)
+            - --gpu-memory-utilization
+            - $(GPU_MEMORY_UTILIZATION)
+            # fp8 KV halves cache memory for a small accuracy cost on long
+            # contexts; well supported on Blackwell and what makes a 14B fit.
+            - --kv-cache-dtype
+            - fp8
+            - --max-num-seqs
+            - "4"
+            - --enforce-eager
+            - --enable-auto-tool-choice
+            - --tool-call-parser
+            - hermes
+          env:
+            - name: MODEL_ID
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_AGENT_MODEL_ID}}
+            - name: SERVED_MODEL_NAME
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_AGENT_SERVED_NAME}}
+            - name: QUANTIZATION
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_AGENT_QUANTIZATION}}
+            - name: MAX_MODEL_LEN
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_AGENT_MAX_MODEL_LEN}}
+            - name: GPU_MEMORY_UTILIZATION
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_AGENT_GPU_MEMORY_UTILIZATION}}
+            - name: VLLM_API_KEY
+              valueFrom: {secretKeyRef: {name: vllm-secrets, key: api-key}}
+            - name: HF_HOME
+              value: /models
+            # WSL2 does not expose the UVA/pinned-memory path required by the
+            # vLLM V2 model runner. The V1 runner is the supported fallback.
+            - name: VLLM_USE_V2_MODEL_RUNNER
+              value: "0"
+          ports:
+            - {name: http, containerPort: 8000}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 180
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests: {cpu: "4", memory: 6Gi, nvidia.com/gpu.shared: 1}
+            limits: {memory: 12Gi, nvidia.com/gpu.shared: 1}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: vllm-qwen-agent-models}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 4Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-qwen-specialist
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector: {app: vllm-qwen-specialist}
+  ports:
+    - {name: http, port: 8000, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen-specialist
+  namespace: agentops
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: vllm-qwen-specialist}
+  template:
+    metadata:
+      labels: {app: vllm-qwen-specialist}
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.29.0
+          args:
+            - --model
+            - $(MODEL_ID)
+            - --served-model-name
+            - $(SERVED_MODEL_NAME)
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --api-key
+            - $(VLLM_API_KEY)
+            - --quantization
+            - $(QUANTIZATION)
+            - --max-model-len
+            - $(MAX_MODEL_LEN)
+            - --gpu-memory-utilization
+            - $(GPU_MEMORY_UTILIZATION)
+            - --max-num-seqs
+            - "4"
+            - --enforce-eager
+            - --enable-auto-tool-choice
+            - --tool-call-parser
+            - hermes
+          env:
+            - name: MODEL_ID
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_SPECIALIST_MODEL_ID}}
+            - name: SERVED_MODEL_NAME
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_SPECIALIST_SERVED_NAME}}
+            - name: QUANTIZATION
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_SPECIALIST_QUANTIZATION}}
+            - name: MAX_MODEL_LEN
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_SPECIALIST_MAX_MODEL_LEN}}
+            - name: GPU_MEMORY_UTILIZATION
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: QWEN_SPECIALIST_GPU_MEMORY_UTILIZATION}}
+            - name: VLLM_API_KEY
+              valueFrom: {secretKeyRef: {name: vllm-secrets, key: api-key}}
+            - name: HF_HOME
+              value: /models
+            - name: VLLM_USE_V2_MODEL_RUNNER
+              value: "0"
+          ports:
+            - {name: http, containerPort: 8000}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 180
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests: {cpu: "2", memory: 4Gi, nvidia.com/gpu.shared: 1}
+            limits: {memory: 8Gi, nvidia.com/gpu.shared: 1}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: vllm-qwen-specialist-models}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 2Gi}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vllm-embedding-models
+  namespace: agentops
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-embedding
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector: {app: vllm-embedding}
+  ports:
+    - {name: http, port: 8000, targetPort: http}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-embedding
+  namespace: agentops
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: vllm-embedding}
+  template:
+    metadata:
+      labels: {app: vllm-embedding}
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:v0.29.0
+          args:
+            - --model
+            - $(MODEL_ID)
+            - --served-model-name
+            - $(SERVED_MODEL_NAME)
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --api-key
+            - $(VLLM_API_KEY)
+            # Pooling rather than generate: this model produces vectors, not
+            # tokens. In vLLM 0.29 the old --task flag is gone; --runner selects
+            # the execution mode.
+            - --runner
+            - pooling
+            - --max-model-len
+            - $(MAX_MODEL_LEN)
+            - --gpu-memory-utilization
+            - $(GPU_MEMORY_UTILIZATION)
+            - --max-num-seqs
+            - "16"
+            - --enforce-eager
+          env:
+            - name: MODEL_ID
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: EMBEDDING_MODEL_ID}}
+            - name: SERVED_MODEL_NAME
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: EMBEDDING_SERVED_NAME}}
+            - name: MAX_MODEL_LEN
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: EMBEDDING_MAX_MODEL_LEN}}
+            - name: GPU_MEMORY_UTILIZATION
+              valueFrom: {configMapKeyRef: {name: vllm-model-config, key: EMBEDDING_GPU_MEMORY_UTILIZATION}}
+            - name: VLLM_API_KEY
+              valueFrom: {secretKeyRef: {name: vllm-secrets, key: api-key}}
+            - name: HF_HOME
+              value: /models
+            - name: VLLM_USE_V2_MODEL_RUNNER
+              value: "0"
+          ports:
+            - {name: http, containerPort: 8000}
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 120
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+            failureThreshold: 3
+          resources:
+            requests: {cpu: "1", memory: 2Gi, nvidia.com/gpu.shared: 1}
+            limits: {memory: 4Gi, nvidia.com/gpu.shared: 1}
+          volumeMounts:
+            - {name: models, mountPath: /models}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: models
+          persistentVolumeClaim: {claimName: vllm-embedding-models}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 1Gi}

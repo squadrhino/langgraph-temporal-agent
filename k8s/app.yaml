@@ -1,0 +1,245 @@
+# The application itself: API, Temporal worker, and the Angular UI.
+#
+# These three ran as host processes during development (uvicorn, the worker
+# module, and `ng serve`). This file is the in-cluster equivalent, so the whole
+# platform is declared in one place rather than half-declared with the
+# interesting parts started by hand.
+#
+# Images are built from the repository root and are not published anywhere:
+#
+#   docker build -f Dockerfile.api -t agentops/api:0.1.0 .
+#   docker build -f Dockerfile.ui  -t agentops/ui:0.1.0  .
+#
+# On minikube, build them into the node's own daemon so no registry is needed:
+#
+#   minikube image build -f Dockerfile.api -t agentops/api:0.1.0 .
+#   minikube image build -f Dockerfile.ui  -t agentops/ui:0.1.0  .
+#
+# imagePullPolicy is IfNotPresent throughout, because a locally built tag has
+# no registry to be pulled from and Always would fail the pod.
+#
+# Three workloads, two images: api and worker are the same image with
+# different commands.
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentops-config
+  namespace: agentops
+data:
+  # In-cluster addresses. The .env file used on the host points at 127.0.0.1
+  # and gateway hostnames; inside the cluster these resolve to Services
+  # directly, which skips the gateway hop for traffic that never leaves.
+  POSTGRES_HOST: postgres-db
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: agentlab
+  REDIS_URL: redis://redis:6379
+  TEMPORAL_ADDRESS: temporal:7233
+  TEMPORAL_NAMESPACE: default
+  TEMPORAL_TASK_QUEUE: order-workflows
+
+  LLM_BASE_URL: http://litellm:4000/v1
+  LLM_MODEL: order-tracking-model
+  SUPERVISOR_MODEL_ID: supervisor-model
+  ORDER_TRACKING_MODEL_ID: order-tracking-model
+  ORDER_ACTIONS_MODEL_ID: order-actions-model
+  INFRASTRUCTURE_MODEL_ID: infrastructure-model
+  EMBEDDING_MODEL_ID: embedding-model
+
+  # The self-check model blocks every request in its current configuration.
+  # See the guardrails notes before turning this on.
+  NEMO_GUARDRAILS_ENABLED: "false"
+  NEMO_LLM_MODEL: nemo-safety-model
+  NEMO_LLM_BASE_URL: http://litellm:4000/v1
+
+  # The issuer must match the `iss` claim in tokens the browser receives, so it
+  # stays a gateway hostname even in-cluster: Keycloak mints tokens naming the
+  # address the user authenticated against.
+  OIDC_ISSUER: http://keycloak.agentops.local/realms/agentops
+  OIDC_AUDIENCE: agentops-app
+  OIDC_REQUIRED: "true"
+
+  CONVERSATION_IDLE_SECONDS: "300"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentops-api
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector: {app: agentops-api}
+  ports:
+    - {name: http, port: 8000, targetPort: http}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentops-api
+  namespace: agentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: agentops-api}
+  template:
+    metadata:
+      labels: {app: agentops-api}
+    spec:
+      containers:
+        - name: api
+          image: agentops/api:0.1.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - configMapRef: {name: agentops-config}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: {name: agentlab-db-secret, key: username}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: agentlab-db-secret, key: password}
+            # The application's own budgeted key, not the master key. A call
+            # that bypasses this gateway also bypasses its budgets and limits.
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef: {name: agentops-app-secret, key: llm-api-key}
+          ports:
+            - {name: http, containerPort: 8000}
+          # Postgres, Redis and Temporal may still be coming up; the startup
+          # probe gives the process room to fail and restart until they are.
+          startupProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+
+---
+# The worker runs no HTTP server and holds no state. Killing it is a
+# non-event: Temporal keeps the workflow history, and a replacement replays
+# from it and carries on. That property is why this is a separate Deployment
+# rather than a thread inside the API.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentops-worker
+  namespace: agentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: agentops-worker}
+  template:
+    metadata:
+      labels: {app: agentops-worker}
+    spec:
+      containers:
+        - name: worker
+          image: agentops/api:0.1.0
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "app.temporal_workflows.worker"]
+          envFrom:
+            - configMapRef: {name: agentops-config}
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: {name: agentlab-db-secret, key: username}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: agentlab-db-secret, key: password}
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef: {name: agentops-app-secret, key: llm-api-key}
+          # No HTTP probe to hang one on. A worker that cannot reach Temporal
+          # exits, and the restart is the health check.
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits: {cpu: "1", memory: 1Gi}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentops-ui
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector: {app: agentops-ui}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentops-ui
+  namespace: agentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: agentops-ui}
+  template:
+    metadata:
+      labels: {app: agentops-ui}
+    spec:
+      containers:
+        - name: ui
+          image: agentops/ui:0.1.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8080}
+          readinessProbe:
+            httpGet: {path: /index.html, port: http}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+
+---
+# One hostname, split by path. Everything the API owns goes to the API; all
+# other paths are Angular routes and fall through to the UI container, which
+# serves index.html and lets the client router resolve them.
+#
+# Gateway API resolves the most specific PathPrefix first, so the "/" rule
+# below is a fallback rather than a catch-all that shadows the others.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agentops-app
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: app-http
+  hostnames:
+    - agentops.local
+  rules:
+    - matches:
+        - {path: {type: PathPrefix, value: /agent}}
+        - {path: {type: PathPrefix, value: /orders}}
+        - {path: {type: PathPrefix, value: /products}}
+        - {path: {type: PathPrefix, value: /auth}}
+        - {path: {type: PathPrefix, value: /me}}
+        - {path: {type: PathPrefix, value: /health}}
+        - {path: {type: PathPrefix, value: /docs}}
+        - {path: {type: PathPrefix, value: /openapi.json}}
+      backendRefs:
+        - name: agentops-api
+          port: 8000
+      timeouts:
+        # Agent turns stream for longer than the 15s default.
+        request: 300s
+        backendRequest: 300s
+    - matches:
+        - {path: {type: PathPrefix, value: /}}
+      backendRefs:
+        - name: agentops-ui
+          port: 80

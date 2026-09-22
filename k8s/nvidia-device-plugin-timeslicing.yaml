@@ -1,0 +1,30 @@
+# Lab-only NVIDIA device-plugin configuration for one GPU shared by several pods.
+# Time-slicing does not isolate GPU memory or compute capacity -- it only hands
+# out scheduling slots, so the per-pod --gpu-memory-utilization values in
+# vllm.yaml are what actually prevent an OOM.
+#
+# Replicas must be >= the number of GPU-requesting pods, or they sit Pending
+# with 'Insufficient nvidia.com/gpu.shared'. Currently: 3 vLLM chat servers +
+# 1 embedding server, with headroom to add more.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nvidia-device-plugin
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: nvidia-device-plugin
+data:
+  time-slicing: |-
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      timeSlicing:
+        renameByDefault: true
+        failRequestsGreaterThanOne: true
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 6

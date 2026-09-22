@@ -1,0 +1,214 @@
+# Private LiteLLM gateway for the three vLLM Deployments in k8s/vllm.yaml.
+# No Ingress, LoadBalancer, or NodePort is created.
+#
+# Persistence lives in the shared Postgres instance defined in postgres.yaml
+# (database 'litellm', role 'litellm'), not in a Postgres of its own.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: litellm-config
+  namespace: agentops
+data:
+  config.yaml: |
+    model_list:
+      - model_name: supervisor-model
+        litellm_params:
+          model: openai/qwen-agent
+          api_base: http://vllm-qwen-agent:8000/v1
+          api_key: os.environ/VLLM_API_KEY
+          # Qwen3 reasons in <think> blocks before answering. This role does not
+          # benefit from it: the output is a tool call or a Yes/No, and the
+          # blocks both cost hundreds of tokens and leak into the response.
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: false
+      - model_name: order-actions-model
+        litellm_params:
+          model: openai/qwen-agent
+          api_base: http://vllm-qwen-agent:8000/v1
+          api_key: os.environ/VLLM_API_KEY
+          # Qwen3 reasons in <think> blocks before answering. This role does not
+          # benefit from it: the output is a tool call or a Yes/No, and the
+          # blocks both cost hundreds of tokens and leak into the response.
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: false
+      - model_name: order-tracking-model
+        litellm_params:
+          model: openai/qwen-specialist
+          api_base: http://vllm-qwen-specialist:8000/v1
+          api_key: os.environ/VLLM_API_KEY
+      - model_name: infrastructure-model
+        litellm_params:
+          model: openai/qwen-specialist
+          api_base: http://vllm-qwen-specialist:8000/v1
+          api_key: os.environ/VLLM_API_KEY
+      # Guardrail self-checks now run on the 14B. gemma-2b was removed: asked to
+      # answer Yes/No it replied "Yes" to every input, including benign product
+      # questions, so it blocked 100% of traffic while appearing to work.
+      - model_name: nemo-safety-model
+        litellm_params:
+          model: openai/qwen-agent
+          api_base: http://vllm-qwen-agent:8000/v1
+          api_key: os.environ/VLLM_API_KEY
+          # Qwen3 reasons in <think> blocks before answering. This role does not
+          # benefit from it: the output is a tool call or a Yes/No, and the
+          # blocks both cost hundreds of tokens and leak into the response.
+          extra_body:
+            chat_template_kwargs:
+              enable_thinking: false
+      # Embeddings for semantic search over chat summaries. Declared with
+      # mode: embedding so LiteLLM routes it to /v1/embeddings rather than
+      # treating it as a chat model.
+      - model_name: embedding-model
+        litellm_params:
+          model: openai/qwen-embedding
+          api_base: http://vllm-embedding:8000/v1
+          api_key: os.environ/VLLM_API_KEY
+        model_info:
+          mode: embedding
+
+      # --- Bedrock ---------------------------------------------------------
+      # The same logical roles, served by hosted models instead of the local
+      # vLLM engines. Nothing routes here by default: these are reachable only
+      # when a role is pointed at them, e.g. SUPERVISOR_MODEL_ID in .env is set
+      # to supervisor-model-bedrock. Declaring an entry costs nothing and makes
+      # no call until it is requested.
+      #
+      # Requires AWS credentials in the LiteLLM pod (env, IRSA or instance
+      # role) and model access granted in the target region. Neither is
+      # configured here -- switching a role without them fails at call time,
+      # not at startup.
+      - model_name: supervisor-model-bedrock
+        litellm_params:
+          model: bedrock/anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: ap-south-1
+
+      - model_name: order-actions-model-bedrock
+        litellm_params:
+          model: bedrock/anthropic.claude-sonnet-4-6
+          aws_region_name: ap-south-1
+
+      - model_name: order-tracking-model-bedrock
+        litellm_params:
+          model: bedrock/anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: ap-south-1
+
+      - model_name: infrastructure-model-bedrock
+        litellm_params:
+          model: bedrock/anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: ap-south-1
+
+      - model_name: nemo-safety-model-bedrock
+        litellm_params:
+          model: bedrock/anthropic.claude-haiku-4-5-20251001-v1:0
+          aws_region_name: ap-south-1
+
+      - model_name: embedding-model-bedrock
+        litellm_params:
+          model: bedrock/amazon.titan-embed-text-v2:0
+          aws_region_name: ap-south-1
+        model_info:
+          mode: embedding
+
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+
+    litellm_settings:
+      request_timeout: 60
+      num_retries: 1
+      drop_params: true
+      # Exposes /metrics for Prometheus. The endpoint requires the master key,
+      # so the scrape config carries an Authorization header.
+      callbacks: ["prometheus"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: agentops
+spec:
+  type: ClusterIP
+  selector:
+    app: litellm
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: agentops
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: litellm
+  template:
+    metadata:
+      labels:
+        app: litellm
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:v1.101.0
+          args: ["--config", "/config/config.yaml", "--port", "4000"]
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: master-key
+            # Admin UI sign-in. The master key is not accepted as a UI
+            # password once these are set.
+            - name: UI_USERNAME
+              value: admin
+            - name: UI_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-secrets
+                  key: ui-password
+            - name: VLLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-secrets
+                  key: api-key
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-db-secret
+                  key: database-url
+          ports:
+            - name: http
+              containerPort: 4000
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: "250m"
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: litellm-config

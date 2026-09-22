@@ -1,0 +1,67 @@
+# Keycloak, deployed in the 'keycloak' namespace alongside its operator.
+#
+# The operator watches only its own namespace (JOSDK_WATCH_CURRENT), so the
+# Keycloak CR must live here rather than in agentops with the rest of the
+# stack. That split has three consequences, all handled below:
+#   1. the database is addressed by its fully-qualified cross-namespace name
+#   2. the DB credentials are duplicated from postgres.yaml
+#   3. the gateway listener must accept routes from this namespace
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-db-secret
+  namespace: keycloak
+type: Opaque
+stringData:
+  username: keycloak
+  password: keycloak-local-password
+
+---
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  instances: 1
+  db:
+    vendor: postgres
+    host: postgres-db.agentops.svc.cluster.local
+    database: keycloak
+    usernameSecret:
+      name: keycloak-db-secret
+      key: username
+    passwordSecret:
+      name: keycloak-db-secret
+      key: password
+  http:
+    httpEnabled: true
+  hostname:
+    hostname: http://keycloak.agentops.local
+  proxy:
+    headers: xforwarded
+  ingress:
+    enabled: false
+
+---
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: keycloak
+  namespace: keycloak
+spec:
+  parentRefs:
+    - name: inference-gateway
+      namespace: agentops
+      sectionName: keycloak-http
+  hostnames:
+    - keycloak.agentops.local
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: keycloak-service
+          port: 8080

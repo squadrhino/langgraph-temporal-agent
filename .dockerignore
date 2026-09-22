@@ -1,0 +1,26 @@
+# Keep the build context small and keep local state out of images.
+.git
+.venv
+.venv313
+__pycache__
+.pytest_cache
+*.pyc
+
+node_modules
+frontend/node_modules
+frontend/dist
+frontend/.angular
+
+# Built by Dockerfile.ui; a stale local copy must never be baked in.
+app/static
+
+# Local-only configuration and notes.
+.env
+CREDENTIALS.md
+CREDENTIALS.html
+old_articles
+diagram-archive
+docs
+*.md
+*.docx
+*.html

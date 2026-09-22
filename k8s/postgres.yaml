@@ -1,0 +1,224 @@
+# Shared PostgreSQL instance for the agentops namespace.
+#
+# One server, one PVC, one version to upgrade -- but every consuming service
+# gets its own role and its own database, so Temporal, LiteLLM, and Keycloak
+# cannot read each other's tables. Consolidating the *instance* while keeping
+# the *databases* separate is the point: a single shared database would collapse
+# the isolation boundary that actually matters.
+#
+# Deliberate local-lab tradeoff: one restart here takes down auth, inference,
+# and workflows together. A production deployment would use separate managed
+# instances per service and accept the extra cost.
+#
+# NOTE: the role/database bootstrap in the ConfigMap below runs ONLY on first
+# boot against an empty data directory. Adding a fourth service later means
+# running the same SQL by hand against the live instance -- editing the
+# ConfigMap and reapplying will not re-run it.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres
+  namespace: agentops
+type: Opaque
+stringData:
+  password: admin123
+
+---
+# Per-service credentials. Each consuming manifest references only its own
+# secret, so no service needs the shared superuser password.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: temporal-db-secret
+  namespace: agentops
+type: Opaque
+stringData:
+  username: temporal
+  password: temporal-local-password
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-db-secret
+  namespace: agentops
+type: Opaque
+stringData:
+  username: litellm
+  password: litellm-local-password
+  # LiteLLM reads a single DSN rather than discrete host/user/password fields.
+  database-url: postgresql://litellm:litellm-local-password@postgres-db:5432/litellm
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-db-secret
+  namespace: agentops
+type: Opaque
+stringData:
+  username: keycloak
+  password: keycloak-local-password
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agentlab-db-secret
+  namespace: agentops
+type: Opaque
+stringData:
+  username: agentlab
+  password: agentlab-local-password
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-initdb
+  namespace: agentops
+data:
+  10-create-service-databases.sh: |
+    #!/bin/bash
+    # Executed once by the postgres entrypoint, as the superuser, against a
+    # freshly initialised cluster. Passwords arrive as container env vars so
+    # they are defined in exactly one place: the per-service secrets above.
+    set -euo pipefail
+
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<EOSQL
+    CREATE ROLE temporal LOGIN PASSWORD '${TEMPORAL_DB_PASSWORD}';
+    CREATE ROLE litellm  LOGIN PASSWORD '${LITELLM_DB_PASSWORD}';
+    CREATE ROLE keycloak LOGIN PASSWORD '${KEYCLOAK_DB_PASSWORD}';
+
+    -- Temporal's auto-setup image applies its own schema but expects both
+    -- databases to exist. Pre-creating them here avoids granting CREATEDB.
+    CREATE DATABASE temporal            OWNER temporal;
+    CREATE DATABASE temporal_visibility OWNER temporal;
+    CREATE DATABASE litellm             OWNER litellm;
+    CREATE DATABASE keycloak            OWNER keycloak;
+
+    -- The ordering application's own database. Unlike the platform databases
+    -- above, it needs pgvector -- which is why this instance runs the pgvector
+    -- image. Created here so a rebuilt volume comes back complete.
+    CREATE ROLE agentlab LOGIN PASSWORD '${AGENTLAB_DB_PASSWORD}';
+    CREATE DATABASE agentlab            OWNER agentlab;
+    EOSQL
+
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname agentlab <<EOSQL
+    CREATE EXTENSION IF NOT EXISTS vector;
+    EOSQL
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-db
+  namespace: agentops
+spec:
+  selector:
+    app: postgres-db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-db
+  namespace: agentops
+spec:
+  serviceName: postgres-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-db
+  template:
+    metadata:
+      labels:
+        app: postgres-db
+    spec:
+      containers:
+        - name: postgres
+          # pgvector's build of PostgreSQL 18 -- same major version as the stock
+          # image, so the existing data directory is unchanged. The application
+          # database needs the vector extension; the platform databases do not.
+          image: pgvector/pgvector:0.8.6-pg18-trixie
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_USER
+              value: agent-admin
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: postgres
+                  key: password
+            # Set explicitly so the bootstrap script has a database to connect
+            # to; without it POSTGRES_DB is unset and `set -u` aborts the script.
+            - name: POSTGRES_DB
+              value: postgres
+            # Keep the cluster in a subdirectory of the mount. This isolates it
+            # from the volume's own lost+found and makes the layout independent
+            # of whatever PGDATA the base image defaults to.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            - name: TEMPORAL_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: temporal-db-secret
+                  key: password
+            - name: LITELLM_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-db-secret
+                  key: password
+            - name: KEYCLOAK_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-db-secret
+                  key: password
+            - name: AGENTLAB_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: agentlab-db-secret
+                  key: password
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "agent-admin", "-d", "postgres"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "agent-admin", "-d", "postgres"]
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1G
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: initdb
+              mountPath: /docker-entrypoint-initdb.d
+      volumes:
+        - name: initdb
+          configMap:
+            name: postgres-initdb
+            # Executable, so the entrypoint runs the script in its own shell
+            # rather than sourcing it into the entrypoint's.
+            defaultMode: 0755
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 15Gi

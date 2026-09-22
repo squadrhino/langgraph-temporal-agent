@@ -1,0 +1,10 @@
+{
+  "/auth": { "target": "http://127.0.0.1:8000", "secure": false },
+  "/me": { "target": "http://127.0.0.1:8000", "secure": false },
+  "/orders": { "target": "http://127.0.0.1:8000", "secure": false },
+  "/products": { "target": "http://127.0.0.1:8000", "secure": false },
+  "/agent": { "target": "http://127.0.0.1:8000", "secure": false },
+  "/health": { "target": "http://127.0.0.1:8000", "secure": false },
+  "/docs": { "target": "http://127.0.0.1:8000", "secure": false },
+  "/openapi.json": { "target": "http://127.0.0.1:8000", "secure": false }
+}
