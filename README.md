@@ -20,7 +20,6 @@ the rest. Read it before drawing conclusions from anything above it.
 
 ## The shape of it
 
-```
 ```mermaid
 flowchart TB
   GW["Envoy Gateway<br/>8 listeners · TCP 5432/6379/7233 dev/operator only"]
