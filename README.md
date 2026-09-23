@@ -161,6 +161,12 @@ connection. Conversation checkpoints expire after 3 days; workflows have a
 7-day execution timeout. An approval arriving on day four has to land somewhere
 the conversation no longer exists.
 
+**The outermost limit runs in Envoy, before the application.** A
+`BackendTrafficPolicy` caps `/agent` at 20 requests per minute per client
+address and everything else at 300. Every other ceiling here — the graph's
+three-turn cap, the gateway key's tokens per minute — is reached only after a
+request has been accepted and handed to Postgres and Redis. See `k8s/app.yaml`.
+
 **Idempotency lives in the database, not the workflow engine.** Temporal
 guarantees at-least-once. The `UNIQUE` idempotency key on `refunds` is what
 makes a second attempt harmless.

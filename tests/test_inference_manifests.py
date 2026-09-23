@@ -361,3 +361,57 @@ def test_litellm_network_policy_allows_only_envoy_gateway_namespace() -> None:
             "ports": [{"protocol": "TCP", "port": 4000}],
         }
     ]
+
+
+def test_agent_path_has_a_tighter_rate_limit_than_the_rest_of_the_app() -> None:
+    """The first ceiling a request meets is in Envoy, not the application.
+
+    Everything else that limits this system -- the graph's iteration cap, the
+    gateway key's tokens-per-minute -- is reached only after a request has been
+    accepted and handed to Postgres and Redis. This asserts an outer limit
+    exists, and that the path where a request costs a model call is capped
+    harder than page loads are.
+    """
+    documents = load_documents("app.yaml")
+    policies = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document["kind"] == "BackendTrafficPolicy"
+    }
+
+    def requests_per_minute(policy_name: str, route_name: str) -> int:
+        policy = policies[policy_name]
+        target = policy["spec"]["targetRefs"][0]
+        assert target["kind"] == "HTTPRoute"
+        assert target["name"] == route_name
+        rate_limit = policy["spec"]["rateLimit"]
+        assert rate_limit["type"] == "Local"
+        rule = rate_limit["local"]["rules"][0]
+        # Distinct gives each client address its own bucket; without it a
+        # single caller would consume the ceiling for everyone.
+        assert rule["clientSelectors"][0]["sourceCIDR"]["type"] == "Distinct"
+        assert rule["limit"]["unit"] == "Minute"
+        return rule["limit"]["requests"]
+
+    agent = requests_per_minute("agentops-agent-rate-limit", "agentops-agent")
+    app = requests_per_minute("agentops-app-rate-limit", "agentops-app")
+    assert agent < app
+
+    # /agent must be its own route, or it cannot carry its own limit.
+    routes = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document["kind"] == "HTTPRoute"
+    }
+    agent_paths = [
+        match["path"]["value"]
+        for rule in routes["agentops-agent"]["spec"]["rules"]
+        for match in rule["matches"]
+    ]
+    assert agent_paths == ["/agent"]
+    other_paths = [
+        match["path"]["value"]
+        for rule in routes["agentops-app"]["spec"]["rules"]
+        for match in rule["matches"]
+    ]
+    assert "/agent" not in other_paths

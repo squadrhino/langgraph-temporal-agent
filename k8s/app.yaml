@@ -205,6 +205,33 @@ spec:
 #
 # Gateway API resolves the most specific PathPrefix first, so the "/" rule
 # below is a fallback rather than a catch-all that shadows the others.
+#
+# /agent is a separate HTTPRoute purely so it can carry its own rate limit.
+# It is the only path where one request costs a model call, so it gets a
+# much tighter ceiling than page loads do.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: agentops-agent
+  namespace: agentops
+spec:
+  parentRefs:
+    - name: inference-gateway
+      sectionName: app-http
+  hostnames:
+    - agentops.local
+  rules:
+    - matches:
+        - {path: {type: PathPrefix, value: /agent}}
+      backendRefs:
+        - name: agentops-api
+          port: 8000
+      timeouts:
+        # Agent turns stream for longer than the 15s default.
+        request: 300s
+        backendRequest: 300s
+
+---
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -218,7 +245,6 @@ spec:
     - agentops.local
   rules:
     - matches:
-        - {path: {type: PathPrefix, value: /agent}}
         - {path: {type: PathPrefix, value: /orders}}
         - {path: {type: PathPrefix, value: /products}}
         - {path: {type: PathPrefix, value: /auth}}
@@ -230,11 +256,77 @@ spec:
         - name: agentops-api
           port: 8000
       timeouts:
-        # Agent turns stream for longer than the 15s default.
-        request: 300s
-        backendRequest: 300s
+        request: 60s
+        backendRequest: 60s
     - matches:
         - {path: {type: PathPrefix, value: /}}
       backendRefs:
         - name: agentops-ui
           port: 80
+
+---
+# The outermost ceiling, and the first one a request meets.
+#
+# Everything else that limits this system sits behind the application: the
+# graph caps iterations per turn, and the gateway key caps tokens and spend
+# per minute. Both of those are reached only after a request has already been
+# accepted, authenticated, and handed to Postgres and Redis. A caller who
+# opens agent turns in a loop exhausts the token budget eventually, but does
+# so by loading every component in front of it first.
+#
+# This limit runs in Envoy, before any of that. It is a Local rate limit, so
+# each proxy replica enforces its own counter with no external Redis -- with
+# one gateway replica that is exact; with several, the effective ceiling is
+# the limit multiplied by the replica count. Move to type: Global with a
+# rate-limit service when that approximation stops being acceptable.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: agentops-agent-rate-limit
+  namespace: agentops
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: agentops-agent
+  rateLimit:
+    type: Local
+    local:
+      rules:
+        # One bucket per client address. Behind a cloud load balancer the
+        # source address is the balancer's unless it preserves the client IP
+        # (externalTrafficPolicy: Local, or PROXY protocol), in which case
+        # every caller shares one bucket -- verify this before relying on it.
+        - clientSelectors:
+            - sourceCIDR:
+                value: 0.0.0.0/0
+                type: Distinct
+          limit:
+            requests: 20
+            unit: Minute
+
+---
+# A blunter ceiling for everything else. Page loads pull many assets at once,
+# so this is sized to absorb a normal first visit rather than to be precise;
+# its job is to stop a flood reaching the API and the UI container at all.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: agentops-app-rate-limit
+  namespace: agentops
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: agentops-app
+  rateLimit:
+    type: Local
+    local:
+      rules:
+        - clientSelectors:
+            - sourceCIDR:
+                value: 0.0.0.0/0
+                type: Distinct
+          limit:
+            requests: 300
+            unit: Minute
