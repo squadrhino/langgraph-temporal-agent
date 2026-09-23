@@ -55,11 +55,8 @@ flowchart TB
 
 Kill any pod in the stateless band and no committed state is lost. Losing Redis ends
 in-flight conversations; a summary of each survives in `agentlab`. Everything that
-must outlive a process lands in Postgres.
-```
-
-Everything in the upper band can be killed and replaced without losing
-anything. That is the property the design is organised around.
+must outlive a process lands in Postgres. That is the property the design is
+organised around.
 
 ### The agent graph
 
@@ -128,11 +125,25 @@ docker build -f Dockerfile.ui  -t $REGISTRY/ui:0.1.0  .
 docker push $REGISTRY/api:0.1.0
 docker push $REGISTRY/ui:0.1.0
 
+kubectl create namespace agentops
+
+kubectl create secret generic vllm-secrets -n agentops \
+  --from-literal=api-key=<any shared key for the vLLM engines>
+
+kubectl create secret generic litellm-secrets -n agentops \
+  --from-literal=master-key=sk-<LiteLLM master key> \
+  --from-literal=ui-password=<LiteLLM UI password>
+
 kubectl create secret generic agentops-app-secret -n agentops \
-  --from-literal=llm-api-key=<the application's LiteLLM key>
+  --from-literal=llm-api-key=<the application's LiteLLM virtual key>
 
 kubectl apply -f k8s/
 ```
+
+`vllm-secrets` and `litellm-secrets` are not in the manifests on purpose; create
+them before applying, or LiteLLM and the vLLM engines will not start. Create
+the application's virtual key in the LiteLLM UI once it is up — it is scoped
+to the local aliases, not the master key.
 
 `k8s/app.yaml` pins `agentops/api:0.1.0` and `agentops/ui:0.1.0`; repoint the
 `image:` fields at your registry, or overlay them, before applying.
@@ -190,6 +201,11 @@ the conversation no longer exists.
 address and everything else at 300. Every other ceiling here — the graph's
 three-turn cap, the gateway key's tokens per minute — is reached only after a
 request has been accepted and handed to Postgres and Redis. See `k8s/app.yaml`.
+Two caveats: the limit is `Local`, so it is per Envoy replica; and route-level
+local limiters track only 20 distinct client addresses, after which the oldest
+bucket is evicted and comes back full
+([envoyproxy/gateway#9973](https://github.com/envoyproxy/gateway/issues/9973)).
+It bounds a small number of callers, not a public listener.
 
 **Idempotency lives in the database, not the workflow engine.** Temporal
 guarantees at-least-once. The `UNIQUE` idempotency key on `refunds` is what
@@ -249,11 +265,19 @@ retry leaves a single row.
 
 ## Writing
 
-A three-part series built on this repository:
+A four-part series built on this repository:
 
-1. **Graph engineering, not prompt engineering** — the graph and what holds it
-   shut
-2. **Three kinds of state** — agent, conversation and workflow state, and the
-   rules for what crosses between them
-3. **Guardrails are positions, not a product** — the layers that say no, and
-   the one this platform does not have yet
+1. **[Graph Engineering, Not Prompts](https://vinayakgajare.hashnode.dev/graph-engineering-not-prompts)**
+   — the graph, and what holds it shut
+2. **Beyond Chat History — State in an Agentic System** — agent, conversation
+   and workflow state, and the rules for what crosses between them
+3. **Protecting the Agent** — the layers that say no, and the one this
+   platform does not have yet
+4. **Observability in Agentic Systems** — what to trace, measure and alert on
+   when the thing failing is a decision, not a request
+
+---
+
+## License
+
+[MIT](LICENSE)
