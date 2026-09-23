@@ -21,17 +21,42 @@ the rest. Read it before drawing conclusions from anything above it.
 ## The shape of it
 
 ```
-                    Envoy Gateway  (one gateway, 8 listeners: HTTP + TCP)
-                          |
-  ---------------------------------------------------  stateless, disposable
-   agentops-ui      agentops-api    agentops-worker    LiteLLM    vLLM x3
-   (nginx/Angular)  (FastAPI)       (Temporal)         (gateway)  (engines)
-  ---------------------------------------------------
-                          |
-  ---------------------------------------------------  stateful, system of record
-   PostgreSQL              Redis                  Temporal server
-   5 databases + pgvector  checkpoints, 3d TTL    event histories
-  ---------------------------------------------------
+```mermaid
+flowchart TB
+  GW["Envoy Gateway<br/>8 listeners · TCP 5432/6379/7233 dev/operator only"]
+
+  subgraph compute["Stateless · disposable"]
+    UI["agentops-ui<br/>nginx / Angular"]
+    API["agentops-api<br/>FastAPI + LangGraph"]
+    WK["agentops-worker<br/>Temporal activities"]
+    LL["LiteLLM<br/>keys · budgets"]
+    VL["vLLM ×3<br/>local engines"]
+    KC["Keycloak<br/>OIDC"]
+  end
+
+  subgraph recoverable["Recoverable · TTL-bound"]
+    RD[("Redis<br/>graph checkpoints · 3-day TTL")]
+  end
+
+  subgraph record["System of record"]
+    TS["Temporal server<br/>timers · retries · task queues"]
+    PG[("PostgreSQL + pgvector<br/>temporal · agentlab · litellm · keycloak")]
+  end
+
+  GW --> UI & API
+  API -->|verify token| KC
+  API -->|model calls| LL --> VL
+  API -->|checkpoint per superstep| RD
+  API ==>|start_workflow · idempotent ID| TS
+  WK <-->|poll tasks · report results| TS
+  WK ==>|refund write · UNIQUE key| PG
+  TS ==>|event histories| PG
+  API -->|summaries · app data| PG
+```
+
+Kill any pod in the stateless band and no committed state is lost. Losing Redis ends
+in-flight conversations; a summary of each survives in `agentlab`. Everything that
+must outlive a process lands in Postgres.
 ```
 
 Everything in the upper band can be killed and replaced without losing
